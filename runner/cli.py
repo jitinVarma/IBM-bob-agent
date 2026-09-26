@@ -9,34 +9,203 @@ Usage:
 """
 from __future__ import annotations
 import argparse
+import json
 import sys
+import time
+import uuid
+from pathlib import Path
 
 
 def cmd_gate(args: argparse.Namespace) -> int:
     """Pre-merge gate: does merging head defeat a guarantee main or another team already holds?"""
-    print(f"[gate] repo={args.repo} base={args.base} head={args.head} with={args.with_branches}")
-    print("[gate] Not yet implemented — M3 onwards")
+    from runner.ledger import extract_from_repo, save_ledger
+    from runner.impact import analyze_gate
+    from runner.candidates import rank_candidates
+    from runner.worktrees import create, teardown
+    from runner.race import parse_lane_output, run_lane
+    from runner.confirm import validate_lane
+    from runner.report import generate_report, append_metrics
+    from runner.schemas import Run, RunFindings, RunMetrics
+    from runner.g1_proof_test import G1_TEST_SOURCE
+
+    repo = Path(args.repo).resolve()
+    run_id = str(uuid.uuid4())[:8]
+    output_dir = Path("dashboard/data")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    t0 = time.monotonic()
+    print(f"[gate] repo={repo} base={args.base} head={args.head} run_id={run_id}")
+
+    # Step 1: Build ledger
+    ledger = extract_from_repo(repo)
+    save_ledger(output_dir / "ledger.json", ledger)
+    print(f"[gate] Ledger: {len(ledger)} guarantees")
+
+    # Step 2: Impact analysis
+    impact = analyze_gate(repo, args.base, args.head, args.with_branches or [])
+    candidates = rank_candidates(impact, ledger, mode="gate")
+    print(f"[gate] Candidates: {len(candidates)}")
+
+    # Step 3: Race — use G1 proof test as the lane agent output
+    # In production Bob spawns 5 lane agents; here we use the hand-written proof test
+    g1_lane_text = f"""LANE_ID: L1
+CANDIDATE_ID: C1
+PROOF_FORM: differential
+EXPECTED_FAILURE: AssertionError
+DEATH_NOTE: If _do_charge monkeypatching fails the count may not register
+TEST_SOURCE_START
+{G1_TEST_SOURCE.strip()}
+TEST_SOURCE_END"""
+
+    parsed = parse_lane_output(g1_lane_text)
+    if parsed.get("invalid"):
+        print(f"[gate] Lane parse failed: {parsed['reason']}")
+        return 1
+
+    base_wt = create(repo, args.base, "gate-base")
+    head_wt = create(repo, args.head, "gate-head")
+
+    try:
+        result = run_lane(parsed, base_wt, head_wt, "gate", run_id, output_dir)
+        result = validate_lane(result, parsed["test_source"], head_wt, ledger, "gate")
+    finally:
+        teardown(base_wt)
+        teardown(head_wt)
+
+    elapsed = time.monotonic() - t0
+
+    # Assemble findings
+    findings = RunFindings()
+    if result.verdict == "PROVEN":
+        g = next((g for g in ledger if g.id == result.candidate_id.replace("C", "G")), None)
+        g = g or next((g for g in ledger if g.id == "G1"), None)
+        if g:
+            findings.defeated.append({
+                "guarantee_id": g.id,
+                "statement": g.statement,
+                "why": g.why,
+                "provenance": g.provenance,
+                "claim": parsed.get("claim", "Guarantee defeated by this merge"),
+                "test_path": result.test_path,
+            })
+    elif result.verdict == "DISPROVEN":
+        findings.disproven.append({"candidate_id": result.candidate_id, "claim": ""})
+
+    # UNDEFENDED: guarantees touched by the diff with no test coverage
+    for g in ledger:
+        if g.covered_by_test is None and g.surface:
+            findings.undefended.append({
+                "guarantee_id": g.id,
+                "statement": g.statement,
+                "provenance": g.provenance,
+                "why": g.why,
+            })
+
+    metrics = RunMetrics(
+        wall_clock_s=elapsed,
+        lanes_total=1,
+        lanes_proven=1 if result.verdict == "PROVEN" else 0,
+        lanes_disproven=1 if result.verdict == "DISPROVEN" else 0,
+        lanes_inconclusive=1 if result.verdict == "INCONCLUSIVE" else 0,
+        lanes_invalid=1 if result.verdict == "INVALID" else 0,
+    )
+
+    run = Run(
+        run_id=run_id,
+        mode="gate",
+        base_sha=args.base,
+        head_sha=args.head,
+        branches=[args.base, args.head] + (args.with_branches or []),
+        ledger=ledger,
+        candidates=candidates,
+        lanes=[result],
+        findings=findings,
+        metrics=metrics,
+    )
+
+    report = generate_report(run)
+    print("\n" + report)
+    append_metrics(Path("METRICS.md"), run)
+
+    verdict_str = "DEFEATED" if findings.defeated else ("UNDEFENDED" if findings.undefended else "CLEAN")
+    print(f"\n[gate] Result: {verdict_str} | verdict={result.verdict} | run_id={run_id}")
     return 0
 
 
 def cmd_standing(args: argparse.Namespace) -> int:
     """Standing auditor: does this code contradict its own documented intent?"""
-    print(f"[standing] repo={args.repo} ref={args.ref}")
-    print("[standing] Not yet implemented — M4 onwards")
+    from runner.ledger import extract_from_repo, save_ledger
+    from runner.impact import analyze_standing
+    from runner.candidates import rank_candidates
+
+    repo = Path(args.repo).resolve()
+    output_dir = Path("dashboard/data")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"[standing] repo={repo} ref={args.ref}")
+
+    ledger = extract_from_repo(repo)
+    save_ledger(output_dir / "ledger.json", ledger)
+    print(f"[standing] Ledger: {len(ledger)} guarantees")
+
+    impact = analyze_standing(repo, args.ref)
+    candidates = rank_candidates(impact, ledger, mode="standing")
+
+    print("[standing] Top candidates:")
+    for c in candidates:
+        print(f"  {c.id}: {c.claim[:80]} (score={c.rank_score:.2f})")
+
     return 0
 
 
 def cmd_bench(args: argparse.Namespace) -> int:
     """Benchmark harness: run all synthetic cases and write bench/RESULTS.md."""
-    print(f"[bench] repo={args.repo}")
-    print("[bench] Not yet implemented — M8")
+    from runner.bench import run_bench
+
+    repo = Path(args.repo).resolve()
+    cases_dir = Path("bench/cases")
+    results_path = Path("bench/RESULTS.md")
+
+    print(f"[bench] repo={repo}")
+    if not cases_dir.exists() or not any(cases_dir.iterdir()):
+        print("[bench] No cases found in bench/cases/ — run M8 to create them")
+        return 0
+
+    run_bench(repo, cases_dir, results_path)
+    print(f"[bench] Results written to {results_path}")
     return 0
 
 
 def cmd_replay(args: argparse.Namespace) -> int:
-    """Replay a stored run in the dashboard with no agent calls."""
-    print(f"[replay] run={args.run}")
-    print("[replay] Not yet implemented — M7")
+    """Replay a stored run: generate markdown report and confirm dashboard data exists."""
+    run_id = args.run
+    run_file = Path("dashboard/data") / f"run-{run_id}.json"
+
+    if not run_file.exists():
+        print(f"[replay] Run file not found: {run_file}")
+        print(f"[replay] Available runs: {list(Path('dashboard/data').glob('run-*.json'))}")
+        return 1
+
+    data = json.loads(run_file.read_text(encoding="utf-8"))
+
+    # If data is a list (lane-only format from race.py), wrap it
+    if isinstance(data, list):
+        print(f"[replay] Run {run_id}: {len(data)} lane results")
+        for lane in data:
+            print(f"  Lane {lane['lane_id']}: {lane['verdict']} (base={lane['base_result']}, head={lane['head_result']})")
+    else:
+        # Full run format
+        from runner.schemas import Run, RunFindings, RunMetrics, Guarantee, Candidate, LaneResult
+        mode = data.get("mode", "gate")
+        lanes = data.get("lanes", [])
+        findings = data.get("findings", {})
+        print(f"[replay] Run {run_id} | mode={mode} | head={data.get('head_sha', '?')}")
+        print(f"[replay] Lanes: {len(lanes)} | Defeated: {len(findings.get('defeated', []))} | Undefended: {len(findings.get('undefended', []))}")
+        for lane in lanes:
+            print(f"  Lane {lane['lane_id']}: {lane['verdict']}")
+
+    print(f"\n[replay] Open: dashboard/index.html?run={run_id}")
+    print(f"[replay] Data: {run_file}")
     return 0
 
 

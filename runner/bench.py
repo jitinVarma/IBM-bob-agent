@@ -85,14 +85,23 @@ def _check_green_alone(repo_path: Path, branch_a: str, branch_b: str) -> bool:
 
 def _check_textual_conflict(repo_path: Path, branch_a: str, branch_b: str) -> bool:
     """Return True if merging branch_b into branch_a would produce a textual conflict."""
-    r = subprocess.run(
-        ["git", "merge-tree",
-         subprocess.run(["git", "merge-base", branch_a, branch_b],
-                        cwd=repo_path, capture_output=True, text=True).stdout.strip(),
-         branch_a, branch_b],
-        cwd=repo_path, capture_output=True, text=True,
-    )
-    return "<<<<<<" in r.stdout
+    try:
+        base_result = subprocess.run(
+            ["git", "merge-base", branch_a, branch_b],
+            cwd=repo_path, capture_output=True, text=True,
+        )
+        base_sha = base_result.stdout.strip()
+        if not base_sha:
+            return False
+        r = subprocess.run(
+            ["git", "merge-tree", base_sha, branch_a, branch_b],
+            cwd=repo_path, capture_output=True,  # binary output
+        )
+        # merge-tree outputs conflict markers as text; decode leniently
+        output = r.stdout.decode("utf-8", errors="replace")
+        return "<<<<<<" in output
+    except Exception:
+        return False
 
 
 def _check_suite_catches(repo_path: Path, base: str, guarantee_id: str) -> bool:

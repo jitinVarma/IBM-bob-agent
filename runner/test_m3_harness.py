@@ -14,6 +14,7 @@ Run from the project root:
 import sys
 import pytest
 from pathlib import Path
+from runner.g1_proof_test import G1_TEST_SOURCE
 
 REPO = Path(__file__).parent.parent / "sample-repo"
 BASE_REF = "a4477c4"   # team-a/rate-limit before merge — no _do_charge
@@ -32,9 +33,6 @@ def test_harness_calibration():
         "this is the merged branch, not the base."
     )
 """
-
-# G1 proof test source
-G1_TEST_SOURCE = (Path(__file__).parent.parent / "sample-repo" / "tests" / "test_g1_ceiling.py").read_text()
 
 
 def test_harness_isolation_calibration():
