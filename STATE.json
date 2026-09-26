@@ -1,0 +1,6 @@
+{
+  "milestone": "M3",
+  "status": "passed",
+  "next": "M4",
+  "notes": "Harness proven. Calibration test: base=PASS head=FAIL (PYTHONPATH isolation confirmed). G1 proof test: base=PASS (a4477c4, no retry) head=FAIL (db61b21, retries exist). Worktrees use cwd=worktree_path, PYTHONPATH cleared, never install app."
+}
