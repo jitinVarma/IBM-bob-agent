@@ -146,3 +146,4 @@ witness-plan.md          Full implementation plan (M0–M8)
 This project uses IBM Bob 2.0 as the orchestrator. Bob spawns subagents for all reasoning tasks (ledger extraction, impact analysis, proof test generation) and calls the Python runner for all deterministic steps. See `.bob/workflow.md` for the full pipeline.
 
 **Submission:** `docs/bob-sessions/` must contain IBM Bob task session summary screenshots from each team member before submission.
+## About Me
